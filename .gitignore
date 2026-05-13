@@ -1,0 +1,21 @@
+# 주가 parquet 캐시 (Streamlit Cloud에서는 yfinance 라이브 페치)
+데이터/주가/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
