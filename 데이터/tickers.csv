@@ -63,12 +63,12 @@ BEN,Franklin Resources,Financials,S&P500
 BF-B,Brown–Forman,Consumer Staples,S&P500
 BG,Bunge Global,Consumer Staples,S&P500
 BIIB,Biogen,Health Care,S&P500
-BK,BNY Mellon,Financials,S&P500
 BKNG,Booking Holdings,Consumer Discretionary,NASDAQ100+S&P500
 BKR,Baker Hughes,Energy,NASDAQ100+S&P500
 BLDR,Builders FirstSource,Industrials,S&P500
 BLK,BlackRock,Financials,S&P500
 BMY,Bristol Myers Squibb,Health Care,S&P500
+BNY,BNY Mellon,Financials,S&P500
 BR,Broadridge Financial Solutions,Industrials,S&P500
 BRK-B,Berkshire Hathaway,Financials,S&P500
 BRO,Brown & Brown,Financials,S&P500
@@ -123,7 +123,7 @@ CRL,Charles River Laboratories,Health Care,S&P500
 CRM,Salesforce,Information Technology,S&P500
 CRWD,CrowdStrike,Information Technology,NASDAQ100+S&P500
 CSCO,Cisco,Information Technology,NASDAQ100+S&P500
-CSGP,CoStar Group,Real Estate,NASDAQ100+S&P500
+CSGP,CoStar Group,Real Estate,S&P500
 CSX,CSX Corporation,Industrials,NASDAQ100+S&P500
 CTAS,Cintas,Industrials,NASDAQ100+S&P500
 CTSH,Cognizant,Information Technology,NASDAQ100+S&P500
@@ -287,7 +287,7 @@ LH,Labcorp,Health Care,S&P500
 LHX,L3Harris,Industrials,S&P500
 LII,Lennox International,Industrials,S&P500
 LIN,Linde plc,Materials,NASDAQ100+S&P500
-LITE,Lumentum,Information Technology,S&P500
+LITE,Lumentum,Information Technology,NASDAQ100+S&P500
 LLY,Lilly (Eli),Health Care,S&P500
 LMT,Lockheed Martin,Industrials,S&P500
 LNT,Alliant Energy,Utilities,S&P500

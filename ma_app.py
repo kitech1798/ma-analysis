@@ -19,6 +19,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, '데이터')
 PRICE_DIR = os.path.join(DATA_DIR, '주가')
 TICKERS_PATH = os.path.join(DATA_DIR, 'tickers.csv')
+COMBINED_PATH = os.path.join(DATA_DIR, '주가_통합.parquet')
 
 # 다크 테크 톤 팔레트
 BG = '#0a0a0a'
@@ -51,6 +52,9 @@ hr {{ border-color: {BORDER}; }}
 .stExpander > details > summary {{ color: {TEXT}; }}
 [data-testid="stDataFrame"] {{ background: {CARD}; border: 1px solid {BORDER}; border-radius: 8px; }}
 .stRadio label, .stCheckbox label, .stMultiSelect label, .stSelectbox label {{ color: {TEXT_MUTED}; }}
+.stTabs [data-baseweb="tab-list"] {{ gap: 4px; border-bottom: 1px solid {BORDER}; }}
+.stTabs [data-baseweb="tab"] {{ color: {TEXT_MUTED}; font-size: 15px; font-weight: 600; }}
+.stTabs [aria-selected="true"] {{ color: {TEXT}; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -62,24 +66,112 @@ def load_tickers():
     return pd.read_csv(TICKERS_PATH, encoding='utf-8-sig')
 
 
+@st.cache_resource
+def load_all_prices():
+    """통합 parquet → {ticker: OHLCV DataFrame}. 읽기 전용 공유 캐시(복사 없음).
+
+    개별 parquet은 .gitignore 대상이라 Streamlit Cloud엔 없다. git으로 올라온
+    통합 파일을 1회 읽어 종목별로 쪼개 둔다 → 라이브 페치 의존 제거 + 스크리너 가속.
+    """
+    if not os.path.exists(COMBINED_PATH):
+        return {}
+    combined = pd.read_parquet(COMBINED_PATH)
+    combined.columns = [str(c).lower() for c in combined.columns]
+    out = {}
+    for ticker, g in combined.groupby('ticker', observed=True):
+        g = g.drop(columns=['ticker']).copy()
+        g['date'] = pd.to_datetime(g['date'])
+        g = g.set_index('date').sort_index()
+        out[str(ticker)] = g
+    return out
+
+
 @st.cache_data(ttl=21600)
 def load_prices(ticker: str):
-    """로컬 parquet 우선, 없으면 yfinance 라이브 페치 (6시간 캐시)."""
+    """통합 캐시 → 개별 parquet → yfinance 라이브 페치 순으로 시도."""
+    allp = load_all_prices()
+    if ticker in allp and not allp[ticker].empty:
+        # cache_resource 공유 객체 — 호출부 변형이 캐시를 오염시키지 않도록 복사본 반환.
+        return allp[ticker].copy()
+
     path = os.path.join(PRICE_DIR, f'{ticker}.parquet')
     if os.path.exists(path):
         df = pd.read_parquet(path)
-    else:
-        try:
-            df = yf.download(ticker, start='2020-01-01', progress=False, auto_adjust=False)
-        except Exception:
-            return None
-        if df is None or df.empty:
-            return None
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df.index = pd.to_datetime(df.index).normalize()
+        df.columns = [str(c).lower() for c in df.columns]
+        # 통합 경로와 동일하게 날짜 인덱스 정렬을 보장.
+        df.index = pd.to_datetime(df.index)
+        return df.sort_index()
+
+    try:
+        df = yf.download(ticker, start='2020-01-01', progress=False, auto_adjust=False)
+    except Exception:
+        return None
+    if df is None or df.empty:
+        return None
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    df.index = pd.to_datetime(df.index).normalize()
     df.columns = [str(c).lower() for c in df.columns]
     return df
+
+
+@st.cache_data
+def data_reference_date():
+    """전 종목 통합 데이터의 최신 거래일(기준일). 데이터 교체는 앱 재시작으로 반영."""
+    allp = load_all_prices()
+    latest = None
+    for df in allp.values():
+        if df.empty:
+            continue
+        d = df.index.max()
+        if latest is None or d > latest:
+            latest = d
+    return latest
+
+
+VERDICT_ORDER = {'🟢 양호': 0, '🟢 정상': 1, '🟡 주의': 2, '🔴 고위험': 3}
+
+
+@st.cache_data
+def build_screener():
+    """전 종목 분석 결과 테이블 (프로세스당 1회 계산, 데이터 교체는 재시작으로 반영)."""
+    allp = load_all_prices()
+    tickers_df = load_tickers()
+    meta = tickers_df.set_index('ticker') if not tickers_df.empty else pd.DataFrame()
+    rows = []
+    for ticker, df in allp.items():
+        try:
+            r = analyze(df)
+        except Exception:
+            continue
+        s = r['state']
+        _, m_pass = r['minervini']
+        info = meta.loc[ticker] if ticker in meta.index else None
+
+        def _meta(col, fallback):
+            if info is None:
+                return fallback
+            val = info[col]
+            return str(val) if pd.notna(val) else fallback
+
+        rows.append({
+            'ticker': ticker,
+            'name': _meta('name', ticker),
+            'sector': _meta('sector', ''),
+            'index': _meta('index', ''),
+            '종합판정': r['verdict'][0],
+            '강세필터': int(m_pass),
+            'Stage': r['stage'][0],
+            '현재가': round(s['close'], 2),
+            '200일이격%': round(s['dist_ma200'], 1),
+            '50일이격%': round(s['dist_ma50'], 1),
+        })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
+    out['_정렬'] = out['종합판정'].map(VERDICT_ORDER).fillna(9)
+    out = out.sort_values(['_정렬', '강세필터'], ascending=[True, False]).drop(columns='_정렬')
+    return out.reset_index(drop=True)
 
 
 def signal_card(label, badge, text):
@@ -95,47 +187,30 @@ def signal_card(label, badge, text):
     )
 
 
-def main():
-    st.title('이동평균선 분석')
-    st.markdown(
-        f"<p style='color:{TEXT_MUTED};margin-top:-12px;font-size:13px;'>"
-        f"20·50·200일선 기준 · S&P 500 + NASDAQ 100 · 큰 실수 회피 우선</p>",
-        unsafe_allow_html=True,
-    )
-
-    tickers_df = load_tickers()
-    if tickers_df.empty:
-        st.error('티커 데이터가 없습니다. `python download_data.py` 를 먼저 실행하세요.')
-        st.stop()
-
-    with st.sidebar:
-        st.header('종목 선택')
-        options = [f"{r.ticker} — {r['name']}" for _, r in tickers_df.iterrows()]
-        choice = st.selectbox('티커 검색 (입력하면 필터링)', options=options, index=0)
-        ticker = choice.split(' — ')[0]
-
-        st.divider()
-        st.header('차트 설정')
-        ma_to_show = st.multiselect('이평선 표시', [10, 20, 50, 150, 200], default=[20, 50, 200])
-        show_volume = st.checkbox('거래량 표시', value=True)
-        date_range = st.radio('기간', ['최근 6개월', '최근 1년', '최근 3년', '전체(2020~)'], index=1)
-
+def render_detail(ticker, tickers_df, ma_to_show, show_volume, date_range, key_prefix='detail'):
+    """단일 종목 7단계 분석 화면."""
     df = load_prices(ticker)
     if df is None or df.empty:
-        st.error(f'{ticker}: 주가 데이터 파일이 없습니다.')
-        st.stop()
+        st.error(
+            f'{ticker}: 주가 데이터를 불러오지 못했습니다. '
+            f'`python download_data.py` 로 데이터를 갱신한 뒤 다시 시도하세요.'
+        )
+        return
 
     result = analyze(df)
     s = result['state']
-    meta = tickers_df[tickers_df['ticker'] == ticker].iloc[0]
+    meta_rows = tickers_df[tickers_df['ticker'] == ticker]
+    name = meta_rows.iloc[0]['name'] if not meta_rows.empty else ticker
+    sector = meta_rows.iloc[0]['sector'] if not meta_rows.empty else ''
+    index_name = meta_rows.iloc[0]['index'] if not meta_rows.empty else ''
 
     # ── 헤더
     h1, h2, h3, h4 = st.columns([3, 1, 1, 1])
     with h1:
-        st.subheader(f"{meta['name']} ({ticker})")
+        st.subheader(f"{name} ({ticker})")
         st.markdown(
             f"<p style='color:{TEXT_MUTED};font-size:12.5px;margin-top:-8px;'>"
-            f"{meta['sector']} · {meta['index']} · 기준일 {s['date'].strftime('%Y-%m-%d')}</p>",
+            f"{sector} · {index_name} · 기준일 {s['date'].strftime('%Y-%m-%d')}</p>",
             unsafe_allow_html=True,
         )
     h2.metric('현재가', f"${s['close']:,.2f}", help='기준일 종가')
@@ -220,7 +295,7 @@ def main():
     )
     fig.update_xaxes(**axis_style)
     fig.update_yaxes(**axis_style)
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key=f'{key_prefix}_chart_{ticker}')
 
     # ── 7단계 해석
     st.subheader('7단계 해석')
@@ -262,7 +337,154 @@ def main():
             ('52주 고점', f"${s['high_52w']:,.2f}", f"{(s['close']/s['high_52w']-1)*100:+.1f}% 차이"),
             ('52주 저점', f"${s['low_52w']:,.2f}", f"{(s['close']/s['low_52w']-1)*100:+.1f}% 차이"),
         ], columns=['항목', '값', '해석'])
-        st.dataframe(rows_data, hide_index=True, use_container_width=True)
+        st.dataframe(rows_data, hide_index=True, use_container_width=True,
+                     key=f'{key_prefix}_metrics_{ticker}')
+
+
+def render_screener(tickers_df, ma_to_show, show_volume, date_range):
+    """전 종목 모아보기 — 종합판정·강세필터·섹터·지수로 필터링."""
+    table = build_screener()
+    if table.empty:
+        st.warning('분석할 종목 데이터가 없습니다. `python download_data.py` 를 먼저 실행하세요.')
+        return
+
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED};font-size:13px;margin-bottom:10px;'>"
+        f"전 종목을 같은 7단계 기준으로 평가했어요. 아래 필터로 좁히고, "
+        f"행을 클릭하면 해당 종목 상세 분석이 펼쳐집니다.</p>",
+        unsafe_allow_html=True,
+    )
+
+    # ── 필터
+    verdict_opts = [v for v in VERDICT_ORDER if v in set(table['종합판정'])]
+    c1, c2 = st.columns([2, 1])
+    with c1:
+        sel_verdict = st.multiselect('종합 판정', verdict_opts, default=verdict_opts)
+    with c2:
+        min_bull = st.slider('강세필터 최소 점수', 0, 8, 0,
+                             help='Minervini 8조건 중 통과 개수 하한')
+
+    c3, c4, c5 = st.columns([1, 2, 2])
+    with c3:
+        index_opts = sorted(set(table['index']))
+        sel_index = st.multiselect('지수', index_opts, default=index_opts)
+    with c4:
+        sector_opts = sorted(x for x in set(table['sector']) if x)
+        sel_sector = st.multiselect('섹터', sector_opts, default=[])
+    with c5:
+        query = st.text_input('티커·종목명 검색', '').strip().lower()
+
+    view = table.copy()
+    if sel_verdict:
+        view = view[view['종합판정'].isin(sel_verdict)]
+    view = view[view['강세필터'] >= min_bull]
+    if sel_index:
+        view = view[view['index'].isin(sel_index)]
+    if sel_sector:
+        view = view[view['sector'].isin(sel_sector)]
+    if query:
+        mask = (view['ticker'].str.lower().str.contains(query, na=False)
+                | view['name'].str.lower().str.contains(query, na=False))
+        view = view[mask]
+
+    # ── 요약 카운트
+    counts = table['종합판정'].value_counts()
+    chips = ' &nbsp; '.join(
+        f"<span style='color:{TEXT};font-weight:600;'>{v}</span> "
+        f"<span style='color:{TEXT_MUTED};'>{counts.get(v, 0)}</span>"
+        for v in verdict_opts
+    )
+    st.markdown(
+        f"<div style='margin:6px 0 12px;font-size:13px;'>"
+        f"<span style='color:{TEXT_MUTED};'>필터 결과 </span>"
+        f"<span style='color:{TEXT};font-weight:700;'>{len(view)}</span>"
+        f"<span style='color:{TEXT_MUTED};'> / 전체 {len(table)}종목 &nbsp;·&nbsp; </span>{chips}</div>",
+        unsafe_allow_html=True,
+    )
+
+    show_cols = ['ticker', 'name', 'sector', 'index', '종합판정', '강세필터',
+                 'Stage', '현재가', '200일이격%', '50일이격%']
+    event = st.dataframe(
+        view[show_cols],
+        hide_index=True,
+        use_container_width=True,
+        height=520,
+        on_select='rerun',
+        selection_mode='single-row',
+        key='screener_table',
+        column_config={
+            'ticker': st.column_config.TextColumn('티커', width='small'),
+            'name': st.column_config.TextColumn('종목명'),
+            'sector': st.column_config.TextColumn('섹터'),
+            'index': st.column_config.TextColumn('지수', width='small'),
+            '종합판정': st.column_config.TextColumn('종합판정', width='small'),
+            '강세필터': st.column_config.ProgressColumn(
+                '강세필터', min_value=0, max_value=8, format='%d/8'),
+            'Stage': st.column_config.TextColumn('Weinstein'),
+            '현재가': st.column_config.NumberColumn('현재가', format='$%.2f'),
+            '200일이격%': st.column_config.NumberColumn('200일이격', format='%+.1f%%'),
+            '50일이격%': st.column_config.NumberColumn('50일이격', format='%+.1f%%'),
+        },
+    )
+
+    sel = event.selection.rows if event and event.selection else []
+    if sel:
+        picked = view.iloc[sel[0]]['ticker']
+        st.divider()
+        st.markdown(
+            f"<p style='color:{GREEN};font-size:13px;font-weight:600;margin-bottom:4px;'>"
+            f"▼ {picked} 상세 분석</p>", unsafe_allow_html=True)
+        render_detail(picked, tickers_df, ma_to_show, show_volume, date_range,
+                      key_prefix='screen')
+    else:
+        st.caption('행을 클릭하면 그 종목의 7단계 상세 분석이 여기 펼쳐집니다.')
+
+
+def main():
+    st.title('이동평균선 분석')
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED};margin-top:-12px;font-size:13px;'>"
+        f"20·50·200일선 기준 · S&P 500 + NASDAQ 100 · 큰 실수 회피 우선</p>",
+        unsafe_allow_html=True,
+    )
+
+    tickers_df = load_tickers()
+    if tickers_df.empty:
+        st.error('티커 데이터가 없습니다. `python download_data.py` 를 먼저 실행하세요.')
+        st.stop()
+
+    ref_date = data_reference_date()
+    ref_str = ref_date.strftime('%Y년 %m월 %d일') if ref_date is not None else '데이터 없음'
+
+    # ── 데이터 기준일 (상단 가운데 크게)
+    st.markdown(
+        f"<div style='text-align:center;margin:6px 0 22px;'>"
+        f"<div style='font-size:11px;letter-spacing:2px;text-transform:uppercase;"
+        f"color:{TEXT_MUTED};margin-bottom:2px;'>데이터 기준일</div>"
+        f"<div style='font-size:32px;font-weight:800;color:{TEXT};letter-spacing:0.5px;'>{ref_str}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    with st.sidebar:
+        st.header('종목 선택')
+        options = [f"{r.ticker} — {r['name']}" for _, r in tickers_df.iterrows()]
+        choice = st.selectbox('티커 검색 (입력하면 필터링)', options=options, index=0)
+        ticker = choice.split(' — ')[0]
+
+        st.divider()
+        st.header('차트 설정')
+        ma_to_show = st.multiselect('이평선 표시', [10, 20, 50, 150, 200],
+                                    default=[20, 50, 200])
+        show_volume = st.checkbox('거래량 표시', value=True)
+        date_range = st.radio('기간', ['최근 6개월', '최근 1년', '최근 3년', '전체(2020~)'],
+                              index=1)
+
+    tab_detail, tab_screen = st.tabs(['개별 분석', '모아보기'])
+    with tab_detail:
+        render_detail(ticker, tickers_df, ma_to_show, show_volume, date_range)
+    with tab_screen:
+        render_screener(tickers_df, ma_to_show, show_volume, date_range)
 
     st.markdown(
         f"<p style='color:{TEXT_MUTED};font-size:11.5px;margin-top:24px;'>"
