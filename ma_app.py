@@ -52,9 +52,23 @@ hr {{ border-color: {BORDER}; }}
 .stExpander > details > summary {{ color: {TEXT}; }}
 [data-testid="stDataFrame"] {{ background: {CARD}; border: 1px solid {BORDER}; border-radius: 8px; }}
 .stRadio label, .stCheckbox label, .stMultiSelect label, .stSelectbox label {{ color: {TEXT_MUTED}; }}
-.stTabs [data-baseweb="tab-list"] {{ gap: 4px; border-bottom: 1px solid {BORDER}; }}
-.stTabs [data-baseweb="tab"] {{ color: {TEXT_MUTED}; font-size: 15px; font-weight: 600; }}
-.stTabs [aria-selected="true"] {{ color: {TEXT}; }}
+.stTabs [data-baseweb="tab-list"] {{
+    gap: 10px; border-bottom: none; margin-bottom: 14px; padding: 4px 0;
+}}
+.stTabs [data-baseweb="tab"] {{
+    color: {TEXT_MUTED}; font-size: 16px; font-weight: 700;
+    padding: 10px 26px; background: {CARD};
+    border: 1px solid {BORDER}; border-radius: 10px;
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
+}}
+.stTabs [data-baseweb="tab"]:hover {{ color: {TEXT}; border-color: {TEXT_MUTED}; }}
+.stTabs [aria-selected="true"] {{
+    color: #0a0a0a !important; background: {GREEN} !important;
+    border-color: {GREEN} !important;
+}}
+.stTabs [data-baseweb="tab-highlight"], .stTabs [data-baseweb="tab-border"] {{
+    display: none;
+}}
 </style>
 """, unsafe_allow_html=True)
 
